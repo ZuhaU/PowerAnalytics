@@ -1,21 +1,4 @@
-date,type,category,severity,metric,value,change_pct,z_score,title,ai_explanation
-2026-07-01,Trend,Total Generation,Positive,total_generation_gwh,15121.51,12.584699986523951,,Total generation increased,"The most crucial findings indicate a year-over-year increase in total elect
-electricity generation by 7.07%, demonstrating a positive growth trend. Add
-Additionally, while forecasts generally estimate a mean error of 3.91%, the
-they have previously been noted as underestimating actual generation by 5.3
-5.32%."
-2026-07-01,YoY,Total Generation,Positive,yoy_growth_pct,7.069264489195359,7.069264489195359,,Year-over-year growth detected,"The most crucial findings indicate a year-over-year increase in total elect
-electricity generation by 7.07%, demonstrating a positive growth trend. Add
-Additionally, while forecasts generally estimate a mean error of 3.91%, the
-they have previously been noted as underestimating actual generation by 5.3
-5.32%."
-2026-07-01,Forecast,Forecast Accuracy,Warning,predicted_gwh,14317.125240302004,-5.319473780713671,,Forecast underestimated actual generation,"The most crucial findings indicate a year-over-year increase in total elect
-electricity generation by 7.07%, demonstrating a positive growth trend. Add
-Additionally, while forecasts generally estimate a mean error of 3.91%, the
-they have previously been noted as underestimating actual generation by 5.3
-5.32%."
-2026-07-01,Forecast,Forecast Accuracy,Positive,mae_gwh,422.42847285600595,3.9084066776146584,,Forecast mean error is 3.9% of actual generation,"The most crucial findings indicate a year-over-year increase in total elect
-electricity generation by 7.07%, demonstrating a positive growth trend. Add
-Additionally, while forecasts generally estimate a mean error of 3.91%, the
-they have previously been noted as underestimating actual generation by 5.3
-5.32%."
+﻿date,type,category,title,metric,value,change_pct,absolute_change_mwh,z_score,severity,ai_explanation
+,Forecast Bias,Forecast Bias,Forecast underestimated actual generation,Forecast Bias,2.8728719343039595,2.8728719343039595,,,Medium,The forecast underestimated actual electricity generation by approximately 2.87% over the evaluation period.
+2026-07-01,YoY Growth,Growth,Latest annual generation increased,YoY Generation Growth,15121.51,7.069264489195366,,,Positive,Electricity generation increased by 7.07% compared with the same period in the previous year.
+2026-07-01,Long-Term Trend,Long-Term Trend,Long-term generation trend is upward,Long-Term Generation Change,15121.51,61.47797740933571,5757.068952,,Positive,"Long-term electricity generation increased by 61.48%, representing a total change of 5,757.07 MWh across the available historical period."
