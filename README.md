@@ -83,7 +83,7 @@ Given that total monthly generation runs somewhere between 8,000–15,000 GWh de
 season, a MAPE around 4% felt like a reasonable place to stop — good enough to trust the
 direction of the forecast, not so good that I'd pretend it's more precise than it is.
 
-## The intelligence layer, and why it's not "AI-powered"
+## The intelligence layer
 
 `generate_insights.py` computes things like the latest YoY growth (currently **+7.07%**), the
 long-term trend across the full history (**+61.48%**), and whether the forecast is running
@@ -106,8 +106,7 @@ ever reads the already-verified rows in `insights.csv` and writes a short 2-3 se
 summary from them, saved to `executive_summary.txt`. It can misphrase something, but it can't
 invent a number that isn't already sitting in the CSV, which is the whole point.
 
-This is also why the Power BI report labels this section **"Automated Insights"** rather than
-"AI-powered" — the actual insight computation is deterministic. If I turn the Ollama summary on,
+This is also why the Power BI report labels this section **"Automated Insights"** — the actual insight computation is deterministic. If I turn the Ollama summary on,
 that specific paragraph is genuinely AI-generated and I'll label it as such, but the table of
 insights itself isn't, and I'd rather the labeling be accurate than sound more impressive than
 it is.
