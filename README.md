@@ -1,363 +1,168 @@
-Power Generation Intelligence
-
-Power Generation Intelligence is a data engineering and analytics project built around Pakistan’s electricity generation data.
-
-The idea is to take electricity generation data, build a proper data pipeline around it, forecast future generation, generate useful insights from the results, and present everything through Power BI.
-
-The project is also being moved toward a fully automated cloud setup using Azure, where the pipeline can run on a schedule without manually running each Python script.
-
-⸻
-
-What the Project Does
-
-The pipeline currently handles:
-
-1. Getting electricity generation data
-2. Storing the raw data
-3. Cleaning and validating the data
-4. Transforming it into analysis-ready datasets
-5. Creating monthly generation data
-6. Forecasting future electricity generation
-7. Evaluating the forecasting model
-8. Generating analytical insights
-9. Uploading the outputs to Azure
-10. Visualizing the results in Power BI
-
-The final version is intended to run automatically in the cloud on a scheduled basis.
-
-⸻
-
-Technologies
-
-* Python — data processing and pipeline orchestration
-* Pandas / NumPy — data cleaning and transformation
-* Statsmodels — SARIMA/SARIMAX forecasting
-* Scikit-learn — model evaluation
-* Azure Data Lake Storage Gen2 — cloud data storage
-* Azure Container Registry — Docker image storage
-* Azure Container Apps Jobs — scheduled pipeline execution
-* Docker — containerization
-* Ollama + Phi-3 Mini — AI-generated executive summaries
-* Power BI — dashboard and visualization
-
-⸻
-
-Data Pipeline
-
-The project follows a Bronze → Silver → Gold structure.
-
-Raw Electricity Data
-        │
-        ▼
-     Bronze
-        │
-        ▼
-     Silver
-        │
-        ├── Validation
-        └── Cleaning
-        │
-        ▼
-      Gold
-        │
-        ├── Forecasting
-        │
-        └── Intelligence
-        │
-        ▼
-      Azure
-        │
-        ▼
-    Power BI
-
-Bronze
-
-The Bronze layer contains the raw electricity-generation dataset.
-
-Generation of Electricity by Sector.csv
-
-The raw data is kept before the analytical transformations are applied.
-
-Silver
-
-The raw dataset is transformed into a normalized structure.
-
-The main fields include:
-
-date
-source
-generation_gwh
-unit
-
-The Silver data is then validated and cleaned before being used by the downstream stages.
-
-Gold
-
-The Gold layer contains the datasets used for analysis, forecasting, and Power BI.
-
-Some of the current outputs include:
-
-electricity_monthly_gold.csv
-electricity_generation_forecast.csv
-forecast_evaluation.csv
-
-⸻
-
-Forecasting
-
-The forecasting component uses a SARIMA/SARIMAX model to forecast monthly electricity generation.
-
-The current model uses:
-
-Order: (1, 1, 1)
-Seasonal Order: (1, 1, 1, 12)
-
-The model is evaluated using a held-out historical test period before being trained on the available historical data to generate the future forecast.
-
-The forecasting stage produces a 12-month forecast with confidence bounds.
-
-The forecast output contains:
-
-date
-forecast_generation_gwh
-lower_bound_gwh
-upper_bound_gwh
-
-The evaluation results are also saved for further analysis.
-
-⸻
-
-Intelligence
-
-The Intelligence layer takes the results produced by the data and forecasting pipeline and turns them into useful findings.
-
-The Python intelligence engine can identify things such as:
-
-* Changes in electricity generation
-* Year-over-year changes
-* Generation trends
-* Changes by generation source
-* Unusually high or low values
-* Forecast errors
-* Forecast underestimation or overestimation
-
-The structured findings are stored in:
-
-Data/Intelligence/insights.csv
-
-An executive summary can also be generated using Ollama and Phi-3 Mini based on the calculated findings.
-
-The idea is to calculate the actual statistics first and then use the language model to explain those results, rather than asking the AI model to analyze the raw dataset and potentially invent numbers.
-
-⸻
-
-Azure
-
-Azure is being used as the cloud backend for the project.
-
-The Data Lake is organized into the following layers:
-
-Azure Data Lake
-│
-├── Bronze
-├── Silver
-├── Gold
-└── Intelligence
-
-The Python pipeline contains upload components that publish the generated datasets to Azure.
-
-The goal is for Azure Data Lake to become the main location for the processed data instead of relying on local CSV files.
-
-⸻
-
-Docker
-
-The project is containerized using Docker.
-
-The Docker container packages the Python environment and project code so that the pipeline can run in a consistent environment.
-
-The main entry point is:
-
-src/pipeline.py
-
-The project is organized into:
-
-src/
-├── ingestion/
-├── transformation/
-├── validation/
-├── forecasting/
-├── intelligence/
-├── azure/
-└── pipeline.py
-
-The Docker image is stored in Azure Container Registry.
-
-⸻
-
-Azure Container Apps Job
-
-The next stage of the project is to run the complete Dockerized pipeline through an Azure Container Apps Job.
-
-The intended workflow is:
-
-Scheduled Job
-      │
-      ▼
-Docker Container
-      │
-      ▼
-pipeline.py
-      │
-      ├── Get latest data
-      ├── Transform
-      ├── Validate
-      ├── Clean
-      ├── Create Gold datasets
-      ├── Forecast
-      ├── Generate insights
-      └── Upload results to Azure
-             │
-             ▼
-        Azure Data Lake
-             │
-             ▼
-          Power BI
-
-Once this is complete, the project should be able to run the pipeline automatically on a schedule instead of requiring each stage to be executed manually.
-
-⸻
-
-Power BI
-
-Power BI is used as the visualization and reporting layer.
-
-The dashboard includes views for:
-
-* Total electricity generation
-* Generation by source
-* Historical trends
-* Renewable generation
-* Future forecasts
-* Forecast performance
-* Generated intelligence
-
-The final dashboard will use the data stored in Azure rather than depending on local copies of the CSV files.
-
-⸻
-
-Project Structure
-
-PowerGenerationIntelligence/
-│
+# PowerAnalytics
+
+A data pipeline + Power BI dashboard built around Pakistan's monthly electricity generation
+data (published by the State Bank of Pakistan). It ingests the raw data, runs it through a
+Bronze → Silver → Gold pipeline, forecasts the next 12 months of generation with a SARIMAX
+model, generates a few business-relevant insights from the results, and visualizes all of it
+in Power BI.
+
+This started as a fully Azure-based project and later got rebuilt to also run locally after
+my Azure subscription ended. Both versions still exist side by side — more on that below.
+
+## The idea
+
+SBP publishes monthly generation figures broken down by source (hydel, coal, gas, RLNG,
+nuclear, wind, solar, bagasse, etc). The raw file is a wide, messy table that's not really
+usable for analysis on its own. This project cleans it up, restructures it into a proper
+analytics-ready format, forecasts where generation is headed, checks how good those forecasts
+actually are, and surfaces a handful of insights (growth, trend, forecast bias) instead of
+making someone dig through spreadsheets.
+
+## Azure vs. local
+
+I originally built this on Azure: Data Lake Storage Gen2 for the Bronze/Silver/Gold layers,
+a Docker image pushed to Azure Container Registry, and the plan was to run it as a scheduled
+Azure Container Apps Job with Power BI reading straight from the Data Lake.
+
+My Azure subscription ran out before I got the scheduling part fully working, so I restructured
+the project to also run completely locally, using local CSVs instead of the Data Lake. I didn't
+rip out the Azure code — `src/azure/` still has the upload scripts, and `pipeline.py` just skips
+them unless you set `ENABLE_AZURE_UPLOADS=true` (with `AZURE_STORAGE_ACCOUNT` /
+`AZURE_STORAGE_KEY` set). Both Power BI files are still here too — `Power_Analytics_Local.pbix`
+reads local CSVs, `Power_Analytics_Azure.pbix` was built against the Data Lake.
+
+## Layout
+
+```
+PowerAnalytics/
 ├── Data/
-│   ├── Raw/
-│   ├── Silver/
-│   ├── Gold/
-│   └── Intelligence/
-│
+│   ├── Raw/            original SBP export
+│   ├── Silver/         cleaned + reshaped (long format)
+│   ├── Gold/            monthly + per-source analytics tables, forecast, forecast evaluation
+│   └── Intelligence/   insights.csv (+ executive_summary.txt if AI summary is on)
 ├── src/
-│   │
-│   ├── azure/
-│   │   ├── upload_to_bronze.py
-│   │   ├── upload_silver.py
-│   │   ├── upload_gold.py
-│   │   └── upload_source_gold.py
-│   │
-│   ├── forecasting/
-│   │   └── forecast.py
-│   │
-│   ├── ingestion/
-│   │   ├── download_data.py
-│   │   └── inspect_data.py
-│   │
-│   ├── intelligence/
-│   │   └── generate_insights.py
-│   │
-│   ├── transformation/
-│   │   ├── transform_electricity.py
-│   │   ├── create_gold.py
-│   │   └── create_source_gold.py
-│   │
-│   ├── validation/
-│   │   └── validate_data.py
-│   │
-│   ├── pipeline.py
-│   └── requirements.txt
-│
-├── Dockerfile
-├── .dockerignore
-└── README.md
+│   ├── ingestion/       SBP scraping (Playwright) + a manual API-key check
+│   ├── transformation/  Raw -> Silver -> Gold
+│   ├── validation/      data quality checks on Silver
+│   ├── forecasting/     SARIMAX forecast + evaluation
+│   ├── intelligence/    insight generation + optional Ollama summary
+│   ├── azure/           ADLS Gen2 upload scripts (off by default)
+│   └── pipeline.py      runs everything above in order
+├── powerbi/             both .pbix files
+├── tests/               pytest suite against the pipeline outputs
+├── requirements.txt
+└── Dockerfile
+```
 
-⸻
+## Running it
 
-Current Status
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+playwright install --with-deps chromium   # only needed for live ingestion
 
-Completed
+python src/pipeline.py
+```
 
-* Electricity generation data processing
-* Bronze layer
-* Silver transformation
-* Data validation
-* Data cleaning
-* Monthly Gold dataset
-* Source Gold dataset
-* SARIMA/SARIMAX forecasting
-* 12-month future forecast
-* Forecast model evaluation
-* Intelligence generation
-* AI-generated executive summary
-* Azure Data Lake setup
-* Bronze data upload
-* Silver data upload
-* Gold data upload
-* Docker containerization
-* Azure Container Registry
-* Azure Container Apps Job setup
-* Power BI dashboard
+By default `USE_LIVE_INGESTION` and `ENABLE_AZURE_UPLOADS` are both off, so it reuses the Raw
+CSV already in the repo and everything stays local — no API key or Azure account needed to get
+a full run.
 
-Still Working On
+## Forecasting
 
-* Upload Intelligence output to Azure
-* Connect Intelligence output to Power BI
-* Push the final Docker image to Azure Container Registry
-* Get the complete pipeline running successfully inside the Azure Container Apps Job
-* Make the SBP data ingestion fully automated
-* Run a complete end-to-end cloud test
-* Final project cleanup and documentation
+The forecast model is a SARIMAX(1,1,1)(1,1,1,12) — order and seasonal order tuned for the
+monthly seasonality in generation data. Before producing the actual 12-month forecast, it's
+trained on everything except the last 12 months and evaluated against that held-out period:
 
-⸻
+- MAE: **~422 GWh**
+- RMSE: **~528 GWh**
+- MAPE: **~4.3%**
 
-Final Goal
+Given that total monthly generation runs somewhere between 8,000–15,000 GWh depending on the
+season, a MAPE around 4% felt like a reasonable place to stop — good enough to trust the
+direction of the forecast, not so good that I'd pretend it's more precise than it is.
 
-The end goal is for the complete project to work like this:
+## The intelligence layer, and why it's not "AI-powered"
 
-                         Azure
-                           │
-                    Scheduled Job
-                           │
-                           ▼
-                    Docker Container
-                           │
-                           ▼
-                      pipeline.py
-                           │
-            ┌──────────────┼──────────────┐
-            ▼              ▼              ▼
-        Ingestion      Processing     Forecasting
-            │              │              │
-            └──────────────┼──────────────┘
-                           ▼
-                      Intelligence
-                           │
-                           ▼
-                    Azure Data Lake
-                           │
-                           ▼
-                        Power BI
+`generate_insights.py` computes things like the latest YoY growth (currently **+7.07%**), the
+long-term trend across the full history (**+61.48%**), and whether the forecast is running
+ahead of or behind actual generation (currently underestimating by about **2.87%**). Every
+number here comes straight out of the Gold/forecast tables — there's no model involved in
+computing any of it.
 
-The goal is to have one scheduled cloud pipeline that can:
+Early on, I actually had an LLM (Ollama running phi3:mini) generate the explanation text
+directly from the raw numbers. It worked, but not reliably — every so often it would produce
+repetitive or slightly malformed sentences, and once something like that ends up on a dashboard
+it undermines the whole thing, since you can't tell at a glance whether a number is right or
+the model just phrased it weirdly. So I replaced that step with `deterministic_explanation()` —
+plain `if/else` logic that fills in pre-written sentence templates with the already-computed
+numbers. Same inputs always produce the same sentence, and the text can never disagree with the
+number sitting right next to it.
 
-Pull the latest data → process it → forecast electricity generation → generate insights → store the results in Azure → make the updated information available in Power BI.
+Ollama is still in the project, just moved: it's now an optional layer *on top of* the
+deterministic output (`ENABLE_AI_SUMMARY=true`, needs `ollama pull phi3:mini`), where it only
+ever reads the already-verified rows in `insights.csv` and writes a short 2-3 sentence executive
+summary from them, saved to `executive_summary.txt`. It can misphrase something, but it can't
+invent a number that isn't already sitting in the CSV, which is the whole point.
 
-The final system should require minimal manual intervention once the cloud automation is in place.
+This is also why the Power BI report labels this section **"Automated Insights"** rather than
+"AI-powered" — the actual insight computation is deterministic. If I turn the Ollama summary on,
+that specific paragraph is genuinely AI-generated and I'll label it as such, but the table of
+insights itself isn't, and I'd rather the labeling be accurate than sound more impressive than
+it is.
+
+## Tests
+
+There's a small pytest suite in `tests/test_pipeline.py` that checks the shape and sanity of
+each output file (no nulls where there shouldn't be, dates in order, renewable share between
+0-100%, forecast bounds ordered correctly, etc.), plus direct tests for the two files that
+actually have standalone functions to test (`validate_data.py`, `generate_insights.py`).
+
+```bash
+pip install pytest
+python src/pipeline.py   # generate the outputs first
+pytest
+```
+
+One thing writing these turned up: `validate_data()` used to throw a raw `KeyError` instead of
+a clean error message when a required column was missing entirely, because the null-check ran
+before confirming the columns existed. Fixed it with an early return right after the
+missing-columns check, and updated the test accordingly.
+
+## What building this actually involved
+
+- Cleaning and reshaping a real, messy government dataset before it was usable for anything —
+  wide format, inconsistent naming, mixed units, negative values that shouldn't exist.
+- Structuring the pipeline into Bronze/Silver/Gold and actually feeling why that separation
+  matters, rather than just following a pattern I'd read about.
+- Wiring together Azure Data Lake Storage Gen2, Container Registry, and Container Apps into one
+  working flow, and separately dealing with Azure Data Factory for orchestration.
+- Getting Playwright/Chromium to run inside a Docker container, which is its own small nightmare
+  of missing system libraries and headless-vs-headed issues.
+- Losing the Azure environment partway through and having to split the pipeline logic away from
+  the cloud infrastructure so the project could still run and be verified without it.
+- Debugging the Python → Power BI handoff: after adding the `ai_explanation` column, Power Query
+  was still configured with `Columns=10` from the previous CSV schema. Updating the query to
+  recognize all 11 columns restored the missing field.
+- Data quality validation actually catching something real: the pipeline flagged an invalid
+  negative electricity-generation value during Silver-layer validation. That row gets identified
+  and dropped before it reaches Gold, so it doesn't quietly propagate into the aggregations and
+  the forecast.
+- Actually evaluating the forecast against real held-out data (MAE/RMSE/MAPE) instead of just
+  generating numbers and assuming they were fine.
+- Trying an LLM-generated explanation layer, finding it unreliable enough that I didn't trust it
+  on a dashboard, and replacing it with deterministic logic instead — then bringing the LLM back
+  later as a narrower, safer add-on rather than the source of truth.
+- Making the Power BI report pull from the generated CSVs directly instead of hardcoded figures,
+  so it actually updates when new data comes through.
+
+Basically, this ended up being less about any one piece (the forecasting, the cloud setup, the
+BI layer) and more about getting all of them talking to each other correctly — Python, Docker,
+Azure, CSV schemas, Power Query, and Power BI — and debugging whichever one broke that day.
+
+## Data source
+
+State Bank of Pakistan Easydata API, series group `TS_GP_RLS_ELECGEN_M`, monthly electricity
+generation by source since July 2012. An API key is required for live ingestion; the Raw CSV
+already in this repo is enough to run everything else without one.

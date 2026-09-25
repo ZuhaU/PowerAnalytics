@@ -1,0 +1,8 @@
+azure-storage-file-datalake
+pandas
+numpy
+python-dotenv
+playwright
+scikit-learn
+statsmodels
+requests

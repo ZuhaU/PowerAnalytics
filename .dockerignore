@@ -1,7 +1,13 @@
-.venv
 .git
-.gitignore
-.env
+.github
+.venv
+venv
 __pycache__
 *.pyc
+.env
+.env.example
 logs
+powerbi
+README.md
+.gitignore
+.dockerignore
