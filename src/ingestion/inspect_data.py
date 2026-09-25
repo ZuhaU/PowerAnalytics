@@ -1,6 +1,6 @@
 import pandas as pd
 
-file_path = "Data\Raw\Generation of Electricity by Sector.csv"
+file_path = "Data/Raw/Generation of Electricity by Sector.csv"
 
 df = pd.read_csv(file_path)
 

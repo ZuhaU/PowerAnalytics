@@ -104,19 +104,6 @@ df_silver = df_silver.rename(
     columns={"UNIT": "unit"}
 )
 
-
-# -----------------------------
-# Sort
-# -----------------------------
-
-df_silver = df_long[
-    ["date", "source", "generation_gwh", "UNIT"]
-].copy()
-
-df_silver = df_silver.rename(
-    columns={"UNIT": "unit"}
-)
-
 df_silver["unit"] = df_silver["unit"].str.strip()
 
 # -----------------------------

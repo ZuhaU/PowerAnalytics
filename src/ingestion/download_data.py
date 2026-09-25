@@ -8,9 +8,7 @@ from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+# configuration
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -39,9 +37,7 @@ OUTPUT_FILE = (
 )
 
 
-# ============================================================
-# EXACT SBP SERIES
-# ============================================================
+# exact sbp series
 
 SERIES = {
     "Total Electricity Generation by all sources":
@@ -85,9 +81,7 @@ SERIES = {
 }
 
 
-# ============================================================
-# PARSE SBP RESPONSE
-# ============================================================
+# parse sbp response
 
 def parse_sbp_response(text):
 
@@ -111,9 +105,7 @@ def parse_sbp_response(text):
         ) from exc
 
 
-# ============================================================
-# DOWNLOAD ONE SERIES
-# ============================================================
+# download one series
 
 def download_series(page, series_name, series_key):
 
@@ -175,9 +167,7 @@ def download_series(page, series_name, series_key):
     return df
 
 
-# ============================================================
-# CONVERT API DATA TO ORIGINAL WIDE FORMAT
-# ============================================================
+# convert api data to original wide format
 
 def convert_to_wide(series_data):
 
@@ -266,9 +256,7 @@ def convert_to_wide(series_data):
     return result
 
 
-# ============================================================
-# MAIN INGESTION
-# ============================================================
+# main ingestion
 
 def download_sbp_dataset():
 
@@ -358,7 +346,7 @@ def download_sbp_dataset():
     month_columns = [
         col
         for col in final_data.columns
-        if col not in ["Source", "Unit"]
+        if col not in ["ITEMS", "UNIT"]
     ]
 
     if month_columns:
@@ -372,9 +360,7 @@ def download_sbp_dataset():
         )
 
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
+# entry point
 
 if __name__ == "__main__":
     download_sbp_dataset()

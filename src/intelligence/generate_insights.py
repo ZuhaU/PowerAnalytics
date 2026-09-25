@@ -1,712 +1,1005 @@
-from pathlib import Path
-import json
-import subprocess
+"""
+Power Analytics - Intelligence Engine
 
+Generates business-facing insights from:
+    - electricity_monthly_gold.csv
+    - forecast_evaluation.csv
+    - electricity_generation_forecast.csv
+
+Explanations are generated deterministically (see deterministic_explanation
+below) so the numbers in insights.csv always match the calculations exactly.
+
+If ENABLE_AI_SUMMARY=true and Ollama is running locally, generate_ai_summary()
+takes the finished insight rows and asks phi3:mini to turn them into a short
+paragraph. It only ever sees the rows already written below, not the raw data.
+
+Output:
+    Data/Intelligence/insights.csv
+    Data/Intelligence/executive_summary.txt   (only if ENABLE_AI_SUMMARY=true)
+"""
+
+import json
+import os
+import subprocess
+from pathlib import Path
+import re
 import pandas as pd
 import numpy as np
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+# paths
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-GOLD_FILE = (
-    PROJECT_ROOT
-    / "Data"
-    / "Gold"
-    / "electricity_monthly_gold.csv"
-)
+GOLD_DIR = PROJECT_ROOT / "Data" / "Gold"
+INTELLIGENCE_DIR = PROJECT_ROOT / "Data" / "Intelligence"
 
-FORECAST_FILE = (
-    PROJECT_ROOT
-    / "Data"
-    / "Gold"
-    / "forecast_evaluation.csv"
-)
+MONTHLY_GOLD_FILE = GOLD_DIR / "electricity_monthly_gold.csv"
+FORECAST_EVALUATION_FILE = GOLD_DIR / "forecast_evaluation.csv"
+FORECAST_FILE = GOLD_DIR / "electricity_generation_forecast.csv"
 
-OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "Data"
-    / "Intelligence"
-)
+OUTPUT_FILE = INTELLIGENCE_DIR / "insights.csv"
+EXECUTIVE_SUMMARY_FILE = INTELLIGENCE_DIR / "executive_summary.txt"
 
-OUTPUT_FILE = (
-    OUTPUT_DIR
-    / "insights.csv"
-)
-
-OLLAMA_MODEL = "phi3:mini"
+# off by default -- don't want the pipeline to break on a machine
+# without ollama installed (docker, github actions, etc)
+ENABLE_AI_SUMMARY = os.getenv("ENABLE_AI_SUMMARY", "false").lower() == "true"
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi3:mini")
+OLLAMA_TIMEOUT_SECONDS = 120
 
 
-# ============================================================
-# LOAD DATA
-# ============================================================
+# helpers
 
-def load_gold_data():
+def clean_text(value):
+    """Clean text safely."""
+    if value is None:
+        return ""
 
-    df = pd.read_csv(GOLD_FILE)
+    value = str(value)
 
-    df["date"] = pd.to_datetime(df["date"])
+    # Remove ANSI terminal escape sequences
+    value = re.sub(
+        r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])",
+        "",
+        value
+    )
 
-    df = df.sort_values("date").reset_index(drop=True)
+    return value.strip()
+
+
+def safe_float(value):
+    """Convert a value to float safely."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def detect_generation_column(df):
+    """Detect the electricity generation column."""
+
+    possible_columns = [
+        "generation_gwh",
+        "total_generation_gwh",
+        "electricity_generation_gwh",
+        "generation",
+        "total_generation",
+        "value",
+    ]
+
+    for column in possible_columns:
+        if column in df.columns:
+            return column
+
+    # Fallback: identify a single obvious numeric column
+    numeric_columns = []
+
+    for column in df.columns:
+        if column == "date":
+            continue
+
+        converted = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        )
+
+        if converted.notna().sum() > 0:
+            numeric_columns.append(column)
+
+    if len(numeric_columns) == 1:
+        return numeric_columns[0]
+
+    return None
+
+
+# load monthly gold data
+
+def load_monthly_gold():
+    """Load the monthly gold dataset."""
+
+    if not MONTHLY_GOLD_FILE.exists():
+        print(
+            f"WARNING: Monthly gold file not found: "
+            f"{MONTHLY_GOLD_FILE}"
+        )
+        return pd.DataFrame()
+
+    df = pd.read_csv(MONTHLY_GOLD_FILE)
+
+    print(f"Monthly gold rows loaded: {len(df)}")
+    print(f"Monthly gold columns: {list(df.columns)}")
+
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(
+            df["date"],
+            errors="coerce"
+        )
 
     return df
 
 
-def load_forecast_data():
+# load forecast evaluation
+
+def load_forecast_evaluation():
+    """Load historical forecast evaluation data."""
+
+    if not FORECAST_EVALUATION_FILE.exists():
+        print(
+            f"WARNING: Forecast evaluation file not found: "
+            f"{FORECAST_EVALUATION_FILE}"
+        )
+        return pd.DataFrame()
+
+    df = pd.read_csv(FORECAST_EVALUATION_FILE)
+
+    print(f"Forecast evaluation rows loaded: {len(df)}")
+    print(
+        f"Forecast evaluation columns: "
+        f"{list(df.columns)}"
+    )
+
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(
+            df["date"],
+            errors="coerce"
+        )
+
+    return df
+
+
+# load future forecast
+
+def load_future_forecast():
+    """Load the future forecast."""
 
     if not FORECAST_FILE.exists():
-
-        print("WARNING: Forecast file not found.")
-
+        print(
+            f"WARNING: Future forecast file not found: "
+            f"{FORECAST_FILE}"
+        )
         return pd.DataFrame()
 
     df = pd.read_csv(FORECAST_FILE)
 
-    print(f"Forecast rows loaded: {len(df)}")
+    print(f"Future forecast rows loaded: {len(df)}")
+    print(
+        f"Future forecast columns: "
+        f"{list(df.columns)}"
+    )
+
+    if "date" not in df.columns:
+        print(
+            "WARNING: Future forecast has no date column."
+        )
+        return pd.DataFrame()
+
+    df["date"] = pd.to_datetime(
+        df["date"],
+        errors="coerce"
+    )
+
+    # --------------------------------------------------------
+    # Detect forecast column
+    # --------------------------------------------------------
+
+    possible_columns = [
+        "predicted_gwh",
+        "forecast_gwh",
+        "forecast",
+        "predicted",
+        "prediction",
+        "yhat",
+        "y_pred",
+        "prediction_gwh",
+        "forecasted_gwh",
+    ]
+
+    forecast_column = None
+
+    for column in possible_columns:
+        if column in df.columns:
+            forecast_column = column
+            break
+
+    # --------------------------------------------------------
+    # Numeric fallback
+    # --------------------------------------------------------
+
+    if forecast_column is None:
+
+        numeric_candidates = []
+
+        for column in df.columns:
+
+            if column == "date":
+                continue
+
+            converted = pd.to_numeric(
+                df[column],
+                errors="coerce"
+            )
+
+            if converted.notna().sum() > 0:
+                numeric_candidates.append(column)
+
+        if len(numeric_candidates) == 1:
+            forecast_column = numeric_candidates[0]
+
+    if forecast_column is None:
+        print(
+            "WARNING: No forecast value column "
+            "could be detected."
+        )
+        return pd.DataFrame()
+
+    print(
+        f"Using forecast column: {forecast_column}"
+    )
+
+    df["predicted_gwh"] = pd.to_numeric(
+        df[forecast_column],
+        errors="coerce"
+    )
+
+    df = df.dropna(
+        subset=[
+            "date",
+            "predicted_gwh"
+        ]
+    )
+
+    df = df.sort_values(
+        "date"
+    ).reset_index(drop=True)
 
     return df
 
 
-# ============================================================
-# TREND INTELLIGENCE
-# ============================================================
+# deterministic business explanations
 
-def detect_trends(df):
+def deterministic_explanation(
+    title,
+    category,
+    metric,
+    value,
+    change_pct,
+    severity,
+    absolute_change=None,
+):
+    """
+    Generate clean, factual business explanations.
 
-    insights = []
+    No LLM is used here. All numerical values come directly
+    from the calculated dataset metrics.
+    """
 
-    if len(df) < 2:
-        return insights
-
-    latest = df.iloc[-1]
-    previous = df.iloc[-2]
+    value = safe_float(value)
+    change_pct = safe_float(change_pct)
+    absolute_change = safe_float(absolute_change)
 
     # --------------------------------------------------------
-    # Total generation MoM
+    # Forecast Accuracy
     # --------------------------------------------------------
 
-    previous_total = previous["total_generation_gwh"]
-    current_total = latest["total_generation_gwh"]
+    if category == "Forecast Accuracy":
 
-    if previous_total != 0:
-
-        mom = (
-            (current_total - previous_total)
-            / previous_total
-            * 100
+        return (
+            f"The forecast evaluation recorded a mean "
+            f"absolute percentage error of {abs(value):.2f}%, "
+            f"representing the average difference between "
+            f"predicted and actual generation."
         )
 
-        if abs(mom) >= 3:
+    # --------------------------------------------------------
+    # Forecast Bias
+    # --------------------------------------------------------
 
-            direction = (
-                "increased"
-                if mom > 0
-                else "decreased"
+    if category == "Forecast Bias":
+
+        if value >= 0:
+            return (
+                f"The forecast underestimated actual "
+                f"electricity generation by approximately "
+                f"{abs(value):.2f}% over the evaluation period."
             )
 
-            severity = (
-                "Positive"
-                if mom > 0
-                else "Warning"
+        return (
+            f"The forecast overestimated actual electricity "
+            f"generation by approximately "
+            f"{abs(value):.2f}% over the evaluation period."
+        )
+
+    # --------------------------------------------------------
+    # Year-over-Year Growth
+    # --------------------------------------------------------
+
+    if category == "Growth":
+
+        if change_pct >= 0:
+            return (
+                f"Electricity generation increased by "
+                f"{abs(change_pct):.2f}% compared with the "
+                f"same period in the previous year."
             )
 
-            insights.append({
-                "date": latest["date"],
-                "type": "Trend",
-                "category": "Total Generation",
-                "severity": severity,
-                "metric": "total_generation_gwh",
-                "value": current_total,
-                "change_pct": mom,
-                "z_score": np.nan,
-                "title": (
-                    f"Total generation {direction}"
-                ),
-            })
+        return (
+            f"Electricity generation decreased by "
+            f"{abs(change_pct):.2f}% compared with the "
+            f"same period in the previous year."
+        )
 
     # --------------------------------------------------------
-    # YoY growth
+    # Long-Term Trend
     # --------------------------------------------------------
 
-    yoy = latest.get("yoy_growth_pct")
+    if category == "Long-Term Trend":
 
-    if pd.notna(yoy):
+        if change_pct >= 0:
 
-        if abs(yoy) >= 5:
+            if pd.notna(absolute_change):
+                return (
+                    f"Long-term electricity generation "
+                    f"increased by {abs(change_pct):.2f}%, "
+                    f"representing a total change of "
+                    f"{abs(absolute_change):,.2f} MWh across "
+                    f"the available historical period."
+                )
 
-            direction = (
-                "growth"
-                if yoy > 0
-                else "decline"
+            return (
+                f"Long-term electricity generation increased "
+                f"by {abs(change_pct):.2f}% across the available "
+                f"historical period."
             )
 
-            insights.append({
-                "date": latest["date"],
-                "type": "YoY",
-                "category": "Total Generation",
-                "severity": (
-                    "Positive"
-                    if yoy > 0
-                    else "Warning"
-                ),
-                "metric": "yoy_growth_pct",
-                "value": yoy,
-                "change_pct": yoy,
-                "z_score": np.nan,
-                "title": (
-                    f"Year-over-year {direction} detected"
-                ),
-            })
-
-    # --------------------------------------------------------
-    # Renewable share
-    # --------------------------------------------------------
-
-    current_share = latest[
-        "renewable_share_pct"
-    ]
-
-    previous_share = previous[
-        "renewable_share_pct"
-    ]
-
-    share_change = (
-        current_share - previous_share
-    )
-
-    if abs(share_change) >= 2:
-
-        direction = (
-            "increased"
-            if share_change > 0
-            else "decreased"
-        )
-
-        insights.append({
-            "date": latest["date"],
-            "type": "Renewables",
-            "category": "Renewable Share",
-            "severity": (
-                "Positive"
-                if share_change > 0
-                else "Warning"
-            ),
-            "metric": "renewable_share_pct",
-            "value": current_share,
-            "change_pct": share_change,
-            "z_score": np.nan,
-            "title": (
-                f"Renewable share {direction}"
-            ),
-        })
-
-    return insights
-
-
-# ============================================================
-# ANOMALY DETECTION
-# ============================================================
-
-def detect_anomalies(df):
-
-    insights = []
-
-    if len(df) < 13:
-        return insights
-
-    latest = df.iloc[-1]
-
-    history = df.iloc[-13:-1]
-
-    mean = history[
-        "total_generation_gwh"
-    ].mean()
-
-    std = history[
-        "total_generation_gwh"
-    ].std()
-
-    if std == 0 or pd.isna(std):
-        return insights
-
-    z_score = (
-        latest["total_generation_gwh"] - mean
-    ) / std
-
-    if abs(z_score) >= 2:
-
-        direction = (
-            "above"
-            if z_score > 0
-            else "below"
-        )
-
-        insights.append({
-            "date": latest["date"],
-            "type": "Anomaly",
-            "category": "Total Generation",
-            "severity": "Warning",
-            "metric": "total_generation_gwh",
-            "value": latest["total_generation_gwh"],
-            "change_pct": np.nan,
-            "z_score": z_score,
-            "title": (
-                f"Generation unusually {direction} "
-                "recent baseline"
-            ),
-        })
-
-    return insights
-
-
-# ============================================================
-# HISTORICAL EXTREMES
-# ============================================================
-
-def detect_extremes(df):
-
-    insights = []
-
-    latest = df.iloc[-1]
-
-    max_generation = df[
-        "total_generation_gwh"
-    ].max()
-
-    min_generation = df[
-        "total_generation_gwh"
-    ].min()
-
-    if latest["total_generation_gwh"] == max_generation:
-
-        insights.append({
-            "date": latest["date"],
-            "type": "Milestone",
-            "category": "Total Generation",
-            "severity": "Positive",
-            "metric": "total_generation_gwh",
-            "value": latest["total_generation_gwh"],
-            "change_pct": np.nan,
-            "z_score": np.nan,
-            "title": "Historical generation high",
-        })
-
-    if latest["total_generation_gwh"] == min_generation:
-
-        insights.append({
-            "date": latest["date"],
-            "type": "Milestone",
-            "category": "Total Generation",
-            "severity": "Warning",
-            "metric": "total_generation_gwh",
-            "value": latest["total_generation_gwh"],
-            "change_pct": np.nan,
-            "z_score": np.nan,
-            "title": "Historical generation low",
-        })
-
-    return insights
-
-
-# ============================================================
-# FORECAST INTELLIGENCE
-# ============================================================
-
-def analyze_forecast(forecast_df):
-
-    insights = []
-
-    if forecast_df.empty:
-        return insights
-
-    required = [
-        "date",
-        "actual_gwh",
-        "predicted_gwh",
-        "absolute_error_gwh",
-    ]
-
-    if not all(
-        column in forecast_df.columns
-        for column in required
-    ):
-
-        print(
-            "Forecast evaluation file does not contain "
-            "the expected columns."
-        )
-
-        return insights
-
-    forecast_df["date"] = pd.to_datetime(
-        forecast_df["date"],
-        errors="coerce",
-    )
-
-    forecast_df["actual_gwh"] = pd.to_numeric(
-        forecast_df["actual_gwh"],
-        errors="coerce",
-    )
-
-    forecast_df["predicted_gwh"] = pd.to_numeric(
-        forecast_df["predicted_gwh"],
-        errors="coerce",
-    )
-
-    forecast_df["absolute_error_gwh"] = pd.to_numeric(
-        forecast_df["absolute_error_gwh"],
-        errors="coerce",
-    )
-
-    forecast_df = forecast_df.dropna(
-        subset=[
-            "date",
-            "actual_gwh",
-            "predicted_gwh",
-            "absolute_error_gwh",
-        ]
-    )
-
-    if forecast_df.empty:
-        return insights
-
-    forecast_df = forecast_df.sort_values(
-        "date"
-    ).reset_index(drop=True)
-
-    # --------------------------------------------------------
-    # Latest forecast error
-    # --------------------------------------------------------
-
-    latest = forecast_df.iloc[-1]
-
-    actual = latest["actual_gwh"]
-    predicted = latest["predicted_gwh"]
-
-    if actual != 0:
-
-        error_pct = (
-            (predicted - actual)
-            / actual
-            * 100
-        )
-
-        if abs(error_pct) >= 5:
-
-            direction = (
-                "overestimated"
-                if error_pct > 0
-                else "underestimated"
+        if pd.notna(absolute_change):
+            return (
+                f"Long-term electricity generation decreased "
+                f"by {abs(change_pct):.2f}%, representing a "
+                f"total change of {abs(absolute_change):,.2f} "
+                f"MWh across the available historical period."
             )
 
-            insights.append({
-                "date": latest["date"],
-                "type": "Forecast",
-                "category": "Forecast Accuracy",
-                "severity": "Warning",
-                "metric": "predicted_gwh",
-                "value": predicted,
-                "change_pct": error_pct,
-                "z_score": np.nan,
-                "title": (
-                    f"Forecast {direction} actual generation"
-                ),
-            })
-
-    # --------------------------------------------------------
-    # Overall forecast accuracy
-    # --------------------------------------------------------
-
-    mean_actual = forecast_df[
-        "actual_gwh"
-    ].mean()
-
-    mean_error = forecast_df[
-        "absolute_error_gwh"
-    ].mean()
-
-    if mean_actual != 0:
-
-        mean_error_pct = (
-            mean_error
-            / mean_actual
-            * 100
+        return (
+            f"Long-term electricity generation decreased "
+            f"by {abs(change_pct):.2f}% across the available "
+            f"historical period."
         )
 
-        insights.append({
-            "date": latest["date"],
-            "type": "Forecast",
-            "category": "Forecast Accuracy",
-            "severity": (
-                "Positive"
-                if mean_error_pct < 10
-                else "Warning"
-            ),
-            "metric": "mae_gwh",
-            "value": mean_error,
-            "change_pct": mean_error_pct,
-            "z_score": np.nan,
-            "title": (
-                f"Forecast mean error is "
-                f"{mean_error_pct:.1f}% of actual generation"
-            ),
-        })
+    # --------------------------------------------------------
+    # Future Outlook
+    # --------------------------------------------------------
 
-    return insights
+    if category == "Future Outlook":
+
+        if change_pct >= 0:
+            return (
+                f"The forecast indicates average future "
+                f"generation approximately {abs(change_pct):.2f}% "
+                f"higher than the recent historical average."
+            )
+
+        return (
+            f"The forecast indicates average future "
+            f"generation approximately {abs(change_pct):.2f}% "
+            f"lower than the recent historical average."
+        )
+
+    # --------------------------------------------------------
+    # Generic fallback
+    # --------------------------------------------------------
+
+    return (
+        f"{title}. The observed value is {value:.2f}, "
+        f"with a reported change of "
+        f"{change_pct:.2f}%."
+    )
 
 
-# ============================================================
-# OLLAMA AI SUMMARY
-# ============================================================
+# insight creation
 
-def generate_ai_explanation(insights):
+def create_insight(
+    title,
+    category,
+    metric,
+    value,
+    change_pct,
+    severity,
+    insight_type,
+    date=None,
+    z_score=None,
+    absolute_change=None,
+):
+    """Create one insight record."""
 
-    if not insights:
+    value = safe_float(value)
+    change_pct = safe_float(change_pct)
+    z_score = safe_float(z_score)
+    absolute_change = safe_float(absolute_change)
+
+    explanation = deterministic_explanation(
+        title=title,
+        category=category,
+        metric=metric,
+        value=value,
+        change_pct=change_pct,
+        severity=severity,
+        absolute_change=absolute_change,
+    )
+
+    return {
+        "date": date,
+        "type": insight_type,
+        "category": category,
+        "title": clean_text(title),
+        "metric": clean_text(metric),
+        "value": value,
+        "change_pct": change_pct,
+        "absolute_change_mwh": absolute_change,
+        "z_score": z_score,
+        "severity": clean_text(severity),
+        "ai_explanation": clean_text(explanation),
+    }
+
+
+# ollama executive summary (optional)
+
+def generate_ai_summary(insights_df):
+    """Ask a local Ollama model to turn the insight rows into a short summary.
+    Only sees the rounded values already in insights_df, never the raw data."""
+
+    if insights_df.empty:
         return "No significant insights detected."
 
     facts = []
-
-    for item in insights:
-
+    for _, row in insights_df.iterrows():
         facts.append({
-            "type": item["type"],
-            "category": item["category"],
-            "severity": item["severity"],
-            "title": item["title"],
-            "value": (
-                None
-                if pd.isna(item["value"])
-                else round(float(item["value"]), 2)
-            ),
-            "change_pct": (
-                None
-                if pd.isna(item["change_pct"])
-                else round(float(item["change_pct"]), 2)
-            ),
-            "z_score": (
-                None
-                if pd.isna(item["z_score"])
-                else round(float(item["z_score"]), 2)
-            ),
+            "category": row.get("category"),
+            "title": row.get("title"),
+            "metric": row.get("metric"),
+            "value": None if pd.isna(row.get("value")) else round(float(row["value"]), 2),
+            "change_pct": None if pd.isna(row.get("change_pct")) else round(float(row["change_pct"]), 2),
+            "severity": row.get("severity"),
         })
 
-    prompt = f"""
-You are an electricity analytics assistant.
+    prompt = f"""You are an electricity analytics assistant.
 
-Summarize ONLY the verified findings provided below.
+Summarize only the findings below. Rules:
+- use only the supplied findings, don't invent facts, dates, or new numbers
+- keep every percentage exactly as given
+- forecast accuracy and future forecasts are two different things, don't mix them up
+- pick the 2-3 most important findings and write 2-3 sentences, professional tone
 
-STRICT RULES:
-- Use ONLY the supplied findings.
-- Do not invent facts.
-- Do not invent statistics.
-- Do not create dates or time periods.
-- Do not add economic, seasonal, infrastructure, or policy claims
-  unless they appear explicitly in the findings.
-- Do not calculate new numbers.
-- Preserve all supplied percentages exactly.
-- Do not change 7.07% into another value.
-- Distinguish forecast accuracy from future forecasts.
-- Mention only the 2 or 3 most important findings.
-- Write exactly 2 or 3 sentences.
-- Use concise professional language.
-
-VERIFIED FINDINGS:
+Findings:
 {json.dumps(facts, indent=2)}
-
-Write the executive summary now.
 """
 
     print()
-    print("Running Ollama AI summarization...")
+    print(f"Running Ollama AI summarization ({OLLAMA_MODEL})...")
 
     try:
-
         result = subprocess.run(
-            [
-                "ollama",
-                "run",
-                OLLAMA_MODEL,
-                prompt,
-            ],
+            ["ollama", "run", OLLAMA_MODEL, prompt],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=OLLAMA_TIMEOUT_SECONDS,
             encoding="utf-8",
             errors="replace",
         )
 
         if result.returncode != 0:
-
             print("WARNING: Ollama failed.")
-
             if result.stderr:
                 print(result.stderr)
-
             return "AI summary unavailable."
 
         output = result.stdout.strip()
-
         if not output:
-
-            print(
-                "WARNING: Ollama returned an empty response."
-            )
-
+            print("WARNING: Ollama returned an empty response.")
             return "AI summary unavailable."
 
-        # Remove ANSI terminal escape sequences
-        import re
-
-        output = re.sub(
-            r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])",
-            "",
-            output,
-        )
-
-        # Remove accidental terminal control characters
-        output = "".join(
-            char
-            for char in output
-            if char.isprintable()
-            or char in "\n\r\t"
-        )
-
+        # strip ANSI codes / stray control chars that sometimes leak through
+        output = re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", output)
+        output = "".join(c for c in output if c.isprintable() or c in "\n\r\t")
         return output.strip()
 
     except FileNotFoundError:
-
-        print(
-            "WARNING: Ollama executable was not found."
-        )
-
-        print(
-            "Make sure Ollama is installed and available "
-            "in your PATH."
-        )
-
+        print("WARNING: Ollama executable was not found.")
+        print(f"Make sure Ollama is installed and `ollama pull {OLLAMA_MODEL}` has been run.")
         return "AI summary unavailable."
 
     except subprocess.TimeoutExpired:
-
-        print(
-            "WARNING: Ollama timed out."
-        )
-
+        print("WARNING: Ollama timed out.")
         return "AI summary unavailable."
 
     except Exception as exc:
-
-        print(
-            f"WARNING: Could not run Ollama: {exc}"
-        )
-
+        print(f"WARNING: Could not run Ollama: {exc}")
         return "AI summary unavailable."
 
 
-# ============================================================
-# MAIN
-# ============================================================
+# main intelligence logic
 
 def generate_insights():
 
     print()
     print("=" * 60)
-    print("ENERGY INTELLIGENCE ENGINE")
+    print("POWER ANALYTICS - INTELLIGENCE ENGINE")
     print("=" * 60)
+
+    INTELLIGENCE_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
     # --------------------------------------------------------
     # Load data
     # --------------------------------------------------------
 
-    df = load_gold_data()
-
-    forecast_df = load_forecast_data()
-
-    print(f"Gold rows: {len(df)}")
-
-    # --------------------------------------------------------
-    # Generate insights
-    # --------------------------------------------------------
+    monthly = load_monthly_gold()
+    evaluation = load_forecast_evaluation()
+    future = load_future_forecast()
 
     insights = []
 
-    insights.extend(
-        detect_trends(df)
-    )
+    # 1. forecast accuracy
 
-    insights.extend(
-        detect_anomalies(df)
-    )
+    if not evaluation.empty:
 
-    insights.extend(
-        detect_extremes(df)
-    )
+        mape_column = None
 
-    insights.extend(
-        analyze_forecast(forecast_df)
-    )
+        for column in [
+            "mape",
+            "mape_pct",
+            "MAPE",
+            "mape_percentage",
+        ]:
+            if column in evaluation.columns:
+                mape_column = column
+                break
 
-    # --------------------------------------------------------
-    # Output directory
-    # --------------------------------------------------------
+        if mape_column:
 
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+            mape = pd.to_numeric(
+                evaluation[mape_column],
+                errors="coerce"
+            ).dropna()
 
-    # --------------------------------------------------------
-    # Create output
-    # --------------------------------------------------------
+            if not mape.empty:
+
+                mean_mape = float(
+                    mape.mean()
+                )
+
+                severity = (
+                    "Low"
+                    if mean_mape < 5
+                    else "Medium"
+                    if mean_mape < 10
+                    else "High"
+                )
+
+                insights.append(
+                    create_insight(
+                        title="Forecast accuracy assessment",
+                        category="Forecast Accuracy",
+                        metric="MAPE",
+                        value=mean_mape,
+                        change_pct=mean_mape,
+                        severity=severity,
+                        insight_type="Forecast Accuracy",
+                    )
+                )
+
+        # forecast bias
+
+        actual_column = None
+        predicted_column = None
+
+        for column in [
+            "actual_gwh",
+            "actual",
+            "actual_generation_gwh",
+        ]:
+            if column in evaluation.columns:
+                actual_column = column
+                break
+
+        for column in [
+            "predicted_gwh",
+            "forecast_gwh",
+            "predicted",
+            "forecast",
+        ]:
+            if column in evaluation.columns:
+                predicted_column = column
+                break
+
+        if actual_column and predicted_column:
+
+            actual = pd.to_numeric(
+                evaluation[actual_column],
+                errors="coerce"
+            )
+
+            predicted = pd.to_numeric(
+                evaluation[predicted_column],
+                errors="coerce"
+            )
+
+            valid = pd.DataFrame(
+                {
+                    "actual": actual,
+                    "predicted": predicted,
+                }
+            ).dropna()
+
+            if not valid.empty:
+
+                actual_total = valid["actual"].sum()
+                predicted_total = valid["predicted"].sum()
+
+                if actual_total != 0:
+
+                    bias_pct = (
+                        (
+                            actual_total
+                            - predicted_total
+                        )
+                        / actual_total
+                    ) * 100
+
+                    if abs(bias_pct) < 1:
+                        severity = "Low"
+                    elif abs(bias_pct) < 5:
+                        severity = "Medium"
+                    else:
+                        severity = "High"
+
+                    if bias_pct >= 0:
+                        title = (
+                            "Forecast underestimated actual generation"
+                        )
+                    else:
+                        title = (
+                            "Forecast overestimated actual generation"
+                        )
+
+                    insights.append(
+                        create_insight(
+                            title=title,
+                            category="Forecast Bias",
+                            metric="Forecast Bias",
+                            value=bias_pct,
+                            change_pct=bias_pct,
+                            severity=severity,
+                            insight_type="Forecast Bias",
+                        )
+                    )
+
+    # 2. generation analysis
+
+    generation_column = None
+
+    if not monthly.empty and "date" in monthly.columns:
+
+        generation_column = detect_generation_column(
+            monthly
+        )
+
+        if generation_column:
+
+            monthly[generation_column] = pd.to_numeric(
+                monthly[generation_column],
+                errors="coerce"
+            )
+
+            monthly = monthly.dropna(
+                subset=[
+                    "date",
+                    generation_column
+                ]
+            ).sort_values(
+                "date"
+            ).reset_index(drop=True)
+
+            # latest yoy growth
+
+            if len(monthly) >= 13:
+
+                latest_date = monthly["date"].max()
+
+                latest = monthly[
+                    monthly["date"] == latest_date
+                ]
+
+                previous_year_date = (
+                    latest_date
+                    - pd.DateOffset(years=1)
+                )
+
+                previous = monthly[
+                    monthly["date"] == previous_year_date
+                ]
+
+                if (
+                    not latest.empty
+                    and not previous.empty
+                ):
+
+                    latest_value = float(
+                        latest[generation_column].iloc[0]
+                    )
+
+                    previous_value = float(
+                        previous[generation_column].iloc[0]
+                    )
+
+                    if previous_value != 0:
+
+                        yoy_change = (
+                            (
+                                latest_value
+                                - previous_value
+                            )
+                            / abs(previous_value)
+                        ) * 100
+
+                        severity = (
+                            "Positive"
+                            if yoy_change >= 0
+                            else "Attention"
+                        )
+
+                        title = (
+                            "Latest annual generation increased"
+                            if yoy_change >= 0
+                            else
+                            "Latest annual generation decreased"
+                        )
+
+                        insights.append(
+                            create_insight(
+                                title=title,
+                                category="Growth",
+                                metric="YoY Generation Growth",
+                                value=latest_value,
+                                change_pct=yoy_change,
+                                severity=severity,
+                                insight_type="YoY Growth",
+                                date=latest_date,
+                            )
+                        )
+
+            # long-term trend
+
+            if len(monthly) >= 24:
+
+                first_value = float(
+                    monthly[
+                        generation_column
+                    ].iloc[0]
+                )
+
+                last_value = float(
+                    monthly[
+                        generation_column
+                    ].iloc[-1]
+                )
+
+                if first_value != 0:
+
+                    long_term_change = (
+                        (
+                            last_value
+                            - first_value
+                        )
+                        / abs(first_value)
+                    ) * 100
+
+                    absolute_change = (
+                        last_value
+                        - first_value
+                    )
+
+                    severity = (
+                        "Positive"
+                        if long_term_change >= 0
+                        else "Attention"
+                    )
+
+                    title = (
+                        "Long-term generation trend is upward"
+                        if long_term_change >= 0
+                        else
+                        "Long-term generation trend is downward"
+                    )
+
+                    insights.append(
+                        create_insight(
+                            title=title,
+                            category="Long-Term Trend",
+                            metric="Long-Term Generation Change",
+                            value=last_value,
+                            change_pct=long_term_change,
+                            absolute_change=absolute_change,
+                            severity=severity,
+                            insight_type="Long-Term Trend",
+                            date=monthly["date"].iloc[-1],
+                        )
+                    )
+
+    # 3. future forecast outlook
+
+    if (
+        not future.empty
+        and not monthly.empty
+        and generation_column
+    ):
+
+        recent_values = pd.to_numeric(
+            monthly[generation_column],
+            errors="coerce"
+        ).dropna()
+
+        future_values = pd.to_numeric(
+            future["predicted_gwh"],
+            errors="coerce"
+        ).dropna()
+
+        if (
+            not recent_values.empty
+            and not future_values.empty
+        ):
+
+            # Compare future average against
+            # latest 12 historical observations.
+
+            recent_window = recent_values.tail(12)
+
+            historical_average = float(
+                recent_window.mean()
+            )
+
+            future_average = float(
+                future_values.mean()
+            )
+
+            if historical_average != 0:
+
+                outlook_change = (
+                    (
+                        future_average
+                        - historical_average
+                    )
+                    / abs(historical_average)
+                ) * 100
+
+                severity = (
+                    "Positive"
+                    if outlook_change >= 0
+                    else "Attention"
+                )
+
+                if outlook_change >= 0:
+                    title = (
+                        "Future forecast points to higher generation"
+                    )
+                else:
+                    title = (
+                        "Future forecast points to lower generation"
+                    )
+
+                insights.append(
+                    create_insight(
+                        title=title,
+                        category="Future Outlook",
+                        metric="Forecast vs Recent Average",
+                        value=future_average,
+                        change_pct=outlook_change,
+                        severity=severity,
+                        insight_type="Future Outlook",
+                        date=future["date"].min(),
+                    )
+                )
+
+    # remove duplicates
 
     if insights:
 
-        result = pd.DataFrame(
+        df = pd.DataFrame(
             insights
         )
 
-        # ----------------------------------------------------
-        # Generate one AI explanation
-        # ----------------------------------------------------
-
-        explanation = generate_ai_explanation(
-            insights
+        df = df.drop_duplicates(
+            subset=[
+                "category",
+                "title",
+            ],
+            keep="first",
         )
 
-        result["ai_explanation"] = explanation
+        columns = [
+            "date",
+            "type",
+            "category",
+            "title",
+            "metric",
+            "value",
+            "change_pct",
+            "absolute_change_mwh",
+            "z_score",
+            "severity",
+            "ai_explanation",
+        ]
+
+        df = df[columns]
 
     else:
 
-        result = pd.DataFrame(
+        print(
+            "WARNING: No insights could be generated."
+        )
+
+        df = pd.DataFrame(
             columns=[
                 "date",
                 "type",
                 "category",
-                "severity",
+                "title",
                 "metric",
                 "value",
                 "change_pct",
+                "absolute_change_mwh",
                 "z_score",
-                "title",
+                "severity",
                 "ai_explanation",
             ]
         )
 
-    # --------------------------------------------------------
-    # Save
-    # --------------------------------------------------------
+    # save
 
-    result.to_csv(
+    df.to_csv(
         OUTPUT_FILE,
         index=False,
+        encoding="utf-8-sig",
     )
 
-    # --------------------------------------------------------
-    # Console output
-    # --------------------------------------------------------
+    # optional: ollama executive summary
+
+    if ENABLE_AI_SUMMARY:
+
+        summary = generate_ai_summary(df)
+
+        EXECUTIVE_SUMMARY_FILE.write_text(
+            summary,
+            encoding="utf-8",
+        )
+
+        print()
+        print(f"Executive summary saved to: {EXECUTIVE_SUMMARY_FILE}")
+
+    else:
+
+        summary = None
 
     print()
     print("=" * 60)
@@ -714,43 +1007,38 @@ def generate_insights():
     print("=" * 60)
 
     print(
-        f"Insights generated: {len(result)}"
+        f"Insights generated: {len(df)}"
     )
 
     print(
-        f"Output: {OUTPUT_FILE}"
+        f"Saved to: {OUTPUT_FILE}"
     )
 
-    if not result.empty:
+    if not df.empty:
 
         print()
+        print("Generated insights:")
 
-        print(
-            result[
-                [
-                    "type",
-                    "category",
-                    "severity",
-                    "title",
-                ]
-            ].to_string(
-                index=False
+        for _, row in df.iterrows():
+
+            print(
+                f"- {row['title']}"
             )
-        )
+
+            print(
+                f"  {row['ai_explanation']}"
+            )
+
+    if ENABLE_AI_SUMMARY and summary:
 
         print()
-        print("AI SUMMARY:")
-        print(
-            result[
-                "ai_explanation"
-            ].iloc[0]
-        )
+        print(f"EXECUTIVE SUMMARY (Ollama / {OLLAMA_MODEL}):")
+        print(summary)
+
+    print("=" * 60)
 
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
+# entry point
 
 if __name__ == "__main__":
-
     generate_insights()

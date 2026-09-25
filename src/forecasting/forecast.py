@@ -191,7 +191,7 @@ def create_future_forecast(series, periods=12):
 def main():
 
     print("=" * 60)
-    print("ENERGY DEMAND INTELLIGENCE - FORECASTING")
+    print("POWER ANALYTICS - FORECASTING")
     print("=" * 60)
 
     series = load_data()

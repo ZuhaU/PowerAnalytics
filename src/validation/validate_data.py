@@ -24,6 +24,7 @@ def validate_data(df):
         errors.append(
             f"Missing columns: {missing_columns}"
         )
+        return errors  # can't run the rest of the checks without these columns
 
     # 2. Check for missing values
     if df[required_columns].isnull().any().any():
